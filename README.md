@@ -63,3 +63,4 @@ data/             # gitignored: storage-state.json, last-state.json, market-holi
 ## Notice
 
 Automated access may be subject to IBD's terms of service. You are responsible for compliance.
+"# ScreenStock" 
