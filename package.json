@@ -1,0 +1,32 @@
+{
+  "name": "ibd-screener-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent that logs into IBD Stock Screener, aggregates symbols across preset lists, and emails a daily summary via Gmail.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "scan": "tsx src/index.ts scan",
+    "login": "tsx src/index.ts login",
+    "schedule": "tsx src/index.ts schedule",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.16",
+    "playwright": "^1.49.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/node-cron": "^3.0.11",
+    "@types/nodemailer": "^6.4.17",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

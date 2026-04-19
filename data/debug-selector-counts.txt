@@ -1,0 +1,31 @@
+URL: https://ibdstockscreener.investors.com/
+
+Selector match counts:
+    0  span.stockSymbol
+    0  span.stockSymbol a
+    0  a.stockSymbol
+    0  .stock-symbol
+    0  .stock-symbol a
+    0  .symbol
+    0  .symbol a
+    0  .ticker
+    0  .ticker a
+    0  [data-symbol]
+    0  [data-ticker]
+    0  a[href*="symbol="]
+    0  a[href*="/research/"]
+    0  a[href*="/quote/"]
+    0  tbody tr
+    0  .ant-table-row
+    0  .ant-table-cell
+    0  .ant-table-tbody tr
+    0  .ant-table-tbody td
+    0  .symbol-cell
+    0  .symbolCell
+    0  td[class*="symbol" i]
+    0  td[class*="ticker" i]
+    0  span[class*="symbol" i]
+    0  a[class*="symbol" i]
+    0  .cell-symbol
+    4  [role="row"]
+    0  [role="cell"]

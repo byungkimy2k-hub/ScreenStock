@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.env
+.env.local
+
+# Playwright auth state and runtime data
+data/storage-state.json
+data/last-state.json
+data/browser-profile/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
