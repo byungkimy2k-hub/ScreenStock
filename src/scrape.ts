@@ -16,11 +16,39 @@ export type StockRow = {
 
 export type ScrapeResult = {
   list: string;
+  listId: string;
   url: string;
   symbols: string[];
   rows: StockRow[];
   totalReturned: number;
 };
+
+export type PresetList = {
+  /** IBD's internal list id, e.g. `_NewHighs` (matches the `data-id` attribute). */
+  id: string;
+  /** Human-readable name used in logs and email summaries. */
+  name: string;
+};
+
+/**
+ * The nine IBD preset lists we scan. IDs come straight from the `data-id`
+ * attribute on each menu item in the "IBD Stock Lists" popup.
+ *
+ * (The menu also exposes `_StocksFundsBuying`, `_YourWeeklyReview`, and
+ * `_IBDDataTables`, but those are subscriber-personalized / non-screener
+ * views and are excluded on purpose.)
+ */
+export const PRESET_LISTS: readonly PresetList[] = [
+  { id: '_IBD50', name: 'IBD 50' },
+  { id: '_IBDBigCap20', name: 'IBD Big Cap 20' },
+  { id: '_SectorLeaders', name: 'Sector Leaders' },
+  { id: '_StockSpotlight', name: 'Stock Spotlight' },
+  { id: '_IPOLeaders', name: 'IPO Leaders' },
+  { id: '_NewHighs', name: 'New Highs' },
+  { id: '_RelativeStrengthHigh', name: 'Stocks With Rising RS' },
+  { id: '_GlobalLeaders', name: 'Global Leaders' },
+  { id: '_RisingProfitEstimates', name: 'Rising Profit Estimates' },
+];
 
 /**
  * Heuristic ticker validator (used only as a final fallback / sanity check).
@@ -95,7 +123,7 @@ function extractTickerFromHref(href: string): string | null {
 }
 
 /**
- * Navigate to the "New Highs" screen inside IBD's SPA.
+ * Navigate to the given IBD preset list inside IBD's SPA.
  *
  * The screener is built with Ant Design: the top nav has an "IBD Stock Lists"
  * trigger (`#ibdStocklistMenu`) that reveals a hover/click popup containing
@@ -105,7 +133,7 @@ function extractTickerFromHref(href: string): string | null {
  *      until then).
  *   2. Click the item and wait for the screener body to repaint.
  */
-async function gotoNewHighs(page: Page): Promise<void> {
+async function gotoIbdList(page: Page, list: PresetList): Promise<void> {
   await page.goto(IBD_BASE_URL, { waitUntil: 'domcontentloaded' });
   await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {});
 
@@ -132,10 +160,12 @@ async function gotoNewHighs(page: Page): Promise<void> {
   // The popup is rendered into the DOM but Ant Design toggles its visibility
   // class. force-click bypasses the visibility check; the menu-item handler
   // still fires because the element is in the document.
-  const item = page.locator('[data-id="_NewHighs"]').first();
+  const item = page.locator(`[data-id="${list.id}"]`).first();
   await item.waitFor({ state: 'attached', timeout: 10_000 }).catch(() => {});
   if (await item.count() === 0) {
-    process.stderr.write('warning: "New Highs" item never appeared in the menu.\n');
+    process.stderr.write(
+      `warning: "${list.name}" item (${list.id}) never appeared in the menu.\n`,
+    );
     return;
   }
 
@@ -297,8 +327,9 @@ export type ScrapeOptions = {
   maxResults?: number;
 };
 
-export async function scrapeNewHighs(
+export async function scrapeIbdList(
   context: BrowserContext,
+  list: PresetList,
   options: ScrapeOptions = {},
 ): Promise<ScrapeResult> {
   const minCompRating = options.minCompRating ?? 94;
@@ -309,6 +340,7 @@ export async function scrapeNewHighs(
   // never appear in the DOM as plain text. They DO arrive over the wire as
   // JSON, though, so we listen to every response while navigating and harvest
   // symbols from JSON bodies that look like stock-list payloads.
+  const targetUrlRe = new RegExp(`/ibdlist/get/${list.id}\\b`, 'i');
   const captured: Array<{
     url: string;
     symbols: string[];
@@ -325,12 +357,12 @@ export async function scrapeNewHighs(
       if (!body) return;
       const symbols = harvestSymbolsFromJson(body);
       if (symbols.length === 0) return;
-      const isNewHighs = /\/ibdlist\/get\/_NewHighs/i.test(response.url());
+      const isTargetList = targetUrlRe.test(response.url());
       captured.push({
         url: response.url(),
         symbols,
         sample: Array.isArray(body) ? body.slice(0, 1) : pickSample(body),
-        body: isNewHighs ? body : undefined,
+        body: isTargetList ? body : undefined,
       });
     } catch {
       /* ignore */
@@ -339,24 +371,23 @@ export async function scrapeNewHighs(
   page.on('response', onResponse);
 
   try {
-    await gotoNewHighs(page);
+    await gotoIbdList(page, list);
     const url = page.url();
 
     // Give late XHRs a moment to land.
     await page.waitForTimeout(2_000);
 
     if (options.debugDir) {
-      await dumpDebugArtifacts(page, options.debugDir, captured);
+      await dumpDebugArtifacts(page, options.debugDir, list, captured);
     }
 
     page.off('response', onResponse);
 
-    // Prefer the structured _NewHighs payload (filtered to actual stocks with
-    // fundamentals -- this drops ~1300 ETFs/funds that incidentally print new
-    // 52-week highs but aren't what anyone screens for).
-    const newHighsBody = captured.find((c) => c.body !== undefined)?.body;
-    if (newHighsBody !== undefined) {
-      const allStocks = parseNewHighsRows(newHighsBody);
+    // Prefer the structured list payload (filtered to actual stocks with
+    // fundamentals -- this drops ETFs/funds that print no `comp_rating`).
+    const listBody = captured.find((c) => c.body !== undefined)?.body;
+    if (listBody !== undefined) {
+      const allStocks = parseListRows(listBody);
       const sorted = allStocks
         .filter((r) => (r.compRating ?? 0) >= minCompRating)
         .sort((a, b) => {
@@ -367,11 +398,12 @@ export async function scrapeNewHighs(
         });
       const capped = maxResults > 0 ? sorted.slice(0, maxResults) : sorted;
       return {
-        list: 'New Highs',
+        list: list.name,
+        listId: list.id,
         url,
         symbols: capped.map((r) => r.symbol),
         rows: capped,
-        totalReturned: countTotalRows(newHighsBody),
+        totalReturned: countTotalRows(listBody),
       };
     }
 
@@ -379,7 +411,14 @@ export async function scrapeNewHighs(
     if (symbols.length === 0) {
       symbols = await extractSymbolsFromPage(page);
     }
-    return { list: 'New Highs', url, symbols, rows: [], totalReturned: 0 };
+    return {
+      list: list.name,
+      listId: list.id,
+      url,
+      symbols,
+      rows: [],
+      totalReturned: 0,
+    };
   } finally {
     page.off('response', onResponse);
     await page.close();
@@ -387,11 +426,34 @@ export async function scrapeNewHighs(
 }
 
 /**
- * Parse the `_NewHighs` API response into typed rows, keeping only entries
+ * Scrape every preset list, one after another. Failures on individual lists
+ * are logged but don't abort the run -- aggregation across the remaining
+ * lists is still useful.
+ */
+export async function scrapeAllLists(
+  context: BrowserContext,
+  options: ScrapeOptions = {},
+): Promise<ScrapeResult[]> {
+  const results: ScrapeResult[] = [];
+  for (const list of PRESET_LISTS) {
+    process.stdout.write(`\n--- Scraping ${list.name} (${list.id}) ---\n`);
+    try {
+      const result = await scrapeIbdList(context, list, options);
+      results.push(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`error scraping ${list.name}: ${message}\n`);
+    }
+  }
+  return results;
+}
+
+/**
+ * Parse an `_{List}` API response into typed rows, keeping only entries
  * with a populated `comp_rating` (i.e. stocks with IBD fundamentals -- this
  * filters out ETFs / funds, which print as `null` for ratings).
  */
-function parseNewHighsRows(body: unknown): StockRow[] {
+function parseListRows(body: unknown): StockRow[] {
   const list = extractStockList(body);
   const out: StockRow[] = [];
   for (const raw of list) {
@@ -488,18 +550,26 @@ function pickSample(obj: Record<string, unknown>): unknown {
 }
 
 /**
- * Persist the rendered page so we can figure out the right selectors offline:
- *   - debug-page.html : full DOM as the user sees it
- *   - debug-page.png  : full-page screenshot
- *   - debug-selector-counts.txt : how many nodes match each candidate selector
- *   - debug-network.json : XHR/fetch responses that contained ticker-shaped strings
+ * Persist the rendered page so we can figure out the right selectors offline.
+ * All files are namespaced by the list id (e.g. `debug-NewHighs-page.html`)
+ * so per-list debug runs don't clobber each other:
+ *   - debug-<list>-page.html : full DOM as the user sees it
+ *   - debug-<list>-page.png  : full-page screenshot
+ *   - debug-<list>-selector-counts.txt : how many nodes match each candidate selector
+ *   - debug-<list>-network.json : XHR/fetch responses that contained ticker-shaped strings
+ *   - debug-<list>-raw.json  : full list-API response, if captured
  */
 async function dumpDebugArtifacts(
   page: Page,
   outDir: string,
+  list: PresetList,
   captured: Array<{ url: string; symbols: string[]; sample: unknown; body?: unknown }> = [],
 ): Promise<void> {
   await fs.mkdir(outDir, { recursive: true });
+  // Strip the leading underscore so filenames read "debug-NewHighs-..." rather
+  // than "debug-_NewHighs-...".
+  const slug = list.id.replace(/^_/, '');
+  const prefix = `debug-${slug}`;
 
   const candidateSelectors = [
     'span.stockSymbol',
@@ -538,17 +608,17 @@ async function dumpDebugArtifacts(
   }
 
   const html = await page.content();
-  await fs.writeFile(path.join(outDir, 'debug-page.html'), html, 'utf8');
+  await fs.writeFile(path.join(outDir, `${prefix}-page.html`), html, 'utf8');
 
   await page
-    .screenshot({ path: path.join(outDir, 'debug-page.png'), fullPage: true })
+    .screenshot({ path: path.join(outDir, `${prefix}-page.png`), fullPage: true })
     .catch(() => {});
 
   const summary = Object.entries(counts)
     .map(([sel, n]) => `${n.toString().padStart(5)}  ${sel}`)
     .join('\n');
   await fs.writeFile(
-    path.join(outDir, 'debug-selector-counts.txt'),
+    path.join(outDir, `${prefix}-selector-counts.txt`),
     `URL: ${page.url()}\n\nSelector match counts:\n${summary}\n`,
     'utf8',
   );
@@ -562,16 +632,16 @@ async function dumpDebugArtifacts(
     }))
     .sort((a, b) => b.symbolCount - a.symbolCount);
   await fs.writeFile(
-    path.join(outDir, 'debug-network.json'),
+    path.join(outDir, `${prefix}-network.json`),
     JSON.stringify(networkSummary, null, 2),
     'utf8',
   );
 
-  const newHighsCapture = captured.find((c) => c.body !== undefined);
-  if (newHighsCapture && newHighsCapture.body !== undefined) {
+  const rawCapture = captured.find((c) => c.body !== undefined);
+  if (rawCapture && rawCapture.body !== undefined) {
     await fs.writeFile(
-      path.join(outDir, 'debug-newhighs-raw.json'),
-      JSON.stringify(newHighsCapture.body, null, 2),
+      path.join(outDir, `${prefix}-raw.json`),
+      JSON.stringify(rawCapture.body, null, 2),
       'utf8',
     );
   }
@@ -579,12 +649,12 @@ async function dumpDebugArtifacts(
   process.stdout.write(
     [
       '',
-      `Debug artifacts written to ${outDir}:`,
-      '  - debug-page.html',
-      '  - debug-page.png',
-      '  - debug-selector-counts.txt',
-      '  - debug-network.json',
-      '  - debug-newhighs-raw.json (full _NewHighs API response, if captured)',
+      `Debug artifacts for ${list.name} written to ${outDir}:`,
+      `  - ${prefix}-page.html`,
+      `  - ${prefix}-page.png`,
+      `  - ${prefix}-selector-counts.txt`,
+      `  - ${prefix}-network.json`,
+      `  - ${prefix}-raw.json (full ${list.id} API response, if captured)`,
       '',
     ].join('\n'),
   );

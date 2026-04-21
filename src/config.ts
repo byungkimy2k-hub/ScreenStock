@@ -31,6 +31,12 @@ const SecretsSchema = z.object({
     .default('100')
     .transform((v) => Number.parseInt(v, 10))
     .pipe(z.number().int().min(0).max(2000)),
+
+  MIN_LIST_COUNT: z
+    .string()
+    .default('2')
+    .transform((v) => Number.parseInt(v, 10))
+    .pipe(z.number().int().min(1).max(9)),
 });
 
 export type AppPaths = {
@@ -44,7 +50,7 @@ export type AppConfig = {
   ibd: { user: string; password: string };
   email: { user: string; appPassword: string; to: string; from: string };
   schedule: { skipEarlyCloseDays: boolean };
-  screener: { minCompRating: number; maxResults: number };
+  screener: { minCompRating: number; maxResults: number; minListCount: number };
   paths: AppPaths;
 };
 
@@ -100,7 +106,11 @@ export function loadConfig(): AppConfig {
       from: env.EMAIL_FROM ?? env.GMAIL_USER,
     },
     schedule: { skipEarlyCloseDays: env.SKIP_EARLY_CLOSE_DAYS },
-    screener: { minCompRating: env.MIN_COMP_RATING, maxResults: env.MAX_RESULTS },
+    screener: {
+      minCompRating: env.MIN_COMP_RATING,
+      maxResults: env.MAX_RESULTS,
+      minListCount: env.MIN_LIST_COUNT,
+    },
     paths: buildPaths(pathsParsed.data.DATA_DIR),
   };
   return cached;
