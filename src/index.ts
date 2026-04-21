@@ -3,19 +3,13 @@ import { loginAutomated, loginInteractive, openAuthenticatedContext } from './au
 import { scrapeAllLists, type ScrapeResult } from './scrape.js';
 import { aggregateAndDiff, type AggregationResult } from './aggregate.js';
 import { buildEmailContent, sendSummary } from './email.js';
-import {
-  DEFAULT_CRON_EXPRESSION,
-  DEFAULT_CRON_TIMEZONE,
-  DEFAULT_PREMARKET_CRON_EXPRESSION,
-  loadMarketHolidays,
-  startSchedule,
-} from './schedule.js';
+import { loadMarketHolidays, shouldSkipToday, todayInEasternTime } from './schedule.js';
 
-type Command = 'scan' | 'login' | 'schedule' | 'help';
+type Command = 'scan' | 'login' | 'help';
 
 function parseCommand(argv: string[]): Command {
   const cmd = argv[2]?.toLowerCase();
-  if (cmd === 'scan' || cmd === 'login' || cmd === 'schedule') return cmd;
+  if (cmd === 'scan' || cmd === 'login') return cmd;
   return 'help';
 }
 
@@ -29,10 +23,10 @@ function printHelp(): void {
       '  npm run login -- --manual  Headed interactive login (you sign in by hand)',
       '  npm run scan               Scrape all 9 IBD preset lists, aggregate, diff vs last run, email summary',
       '  npm run scan -- --no-email Same as scan, but skip sending the Gmail summary (useful for testing)',
+      '  npm run scan -- --force    Same as scan, but ignore the NYSE holiday skip',
       '  npm run scan -- --debug    Same as scan, plus dump per-list page HTML / screenshot / API payload to data/',
-      '  npm run schedule           Start node-cron loop: 05:00 and 13:30 America/Los_Angeles, Mon-Fri, skips NYSE holidays',
-      '  npm run schedule -- --run-now   Same as schedule, but also triggers an immediate scan on startup',
-      '  npm run schedule -- --no-email  Same as schedule, but scheduled runs do not send email',
+      '',
+      'Scheduling is handled by the OS (Windows Task Scheduler). See scripts/task-scheduler/ for importable XMLs.',
       '',
     ].join('\n'),
   );
@@ -89,16 +83,34 @@ function printScrapeResult(result: ScrapeResult, minCompRating: number, maxResul
 type RunOnceOptions = {
   debug?: boolean;
   sendEmail?: boolean;
+  /** Skip the NYSE holiday / early-close check (for manual re-runs on days off). */
+  force?: boolean;
 };
 
 /**
- * One end-to-end scan -> aggregate -> (optional) email cycle. This is the
- * single code path shared by the `scan` CLI and the scheduler, so both
- * produce identical side-effects (stdout, state file, email).
+ * One end-to-end scan -> aggregate -> (optional) email cycle. Also the
+ * single code path invoked by Windows Task Scheduler via `npm run scan`,
+ * so the holiday guard lives here rather than in a scheduling daemon.
  */
 async function runOnce(config: AppConfig, options: RunOnceOptions = {}): Promise<void> {
   const debug = options.debug ?? false;
   const sendEmail = options.sendEmail ?? true;
+  const force = options.force ?? false;
+
+  if (!force) {
+    const holidays = await loadMarketHolidays(config.paths.holidaysFile);
+    const today = todayInEasternTime();
+    const skip = shouldSkipToday(today, holidays, {
+      skipEarlyCloseDays: config.schedule.skipEarlyCloseDays,
+    });
+    if (skip) {
+      process.stdout.write(
+        `[${today}] skipping scan: NYSE ${skip} day. Re-run with --force to override.\n`,
+      );
+      return;
+    }
+  }
+
   const { context } = await openAuthenticatedContext(config.paths, { headless: false });
   try {
     const results = await scrapeAllLists(context, {
@@ -155,77 +167,9 @@ async function runOnce(config: AppConfig, options: RunOnceOptions = {}): Promise
 async function runScan(argv: string[]): Promise<void> {
   const debug = argv.includes('--debug');
   const sendEmail = !argv.includes('--no-email');
+  const force = argv.includes('--force');
   const config = loadConfig();
-  await runOnce(config, { debug, sendEmail });
-}
-
-async function runSchedule(argv: string[]): Promise<void> {
-  const runNow = argv.includes('--run-now');
-  const skipEmail = argv.includes('--no-email');
-  const config = loadConfig();
-  const holidays = await loadMarketHolidays(config.paths.holidaysFile);
-
-  const scheduled: Array<{ name: string; expression: string }> = [
-    { name: 'pre-market', expression: DEFAULT_PREMARKET_CRON_EXPRESSION },
-    { name: 'after-close', expression: DEFAULT_CRON_EXPRESSION },
-  ];
-
-  process.stdout.write('IBD Screener scheduler\n');
-  process.stdout.write(`Timezone : ${DEFAULT_CRON_TIMEZONE}\n`);
-  for (const s of scheduled) {
-    process.stdout.write(`  ${s.name.padEnd(12)} ${s.expression}\n`);
-  }
-  process.stdout.write(
-    `Holidays : ${holidays.holidays.size} dated, ${holidays.earlyClose.size} early-close` +
-      (holidays.holidays.size === 0 ? ` (file: ${config.paths.holidaysFile})` : '') +
-      '\n',
-  );
-  process.stdout.write(
-    `Skip early-close days: ${config.schedule.skipEarlyCloseDays}\n`,
-  );
-
-  const handler = (): Promise<void> =>
-    runOnce(config, { debug: false, sendEmail: !skipEmail });
-
-  const tasks = scheduled.map((s) =>
-    startSchedule(handler, {
-      holidays,
-      skipEarlyCloseDays: config.schedule.skipEarlyCloseDays,
-      expression: s.expression,
-      name: s.name,
-    }),
-  );
-
-  if (runNow) {
-    process.stdout.write('\n--run-now: triggering an immediate scan...\n');
-    try {
-      await handler();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`--run-now failed: ${message}\n`);
-    }
-  }
-
-  process.stdout.write('\nScheduler running. Press Ctrl+C to stop.\n');
-  await waitForShutdown(() => {
-    for (const t of tasks) t.stop();
-  });
-}
-
-/**
- * Block on SIGINT / SIGTERM so the cron timers keep the process alive and
- * we can stop them cleanly. Resolves once a shutdown signal arrives.
- */
-function waitForShutdown(onShutdown: () => void): Promise<void> {
-  return new Promise<void>((resolve) => {
-    const shutdown = (signal: string) => (): void => {
-      process.stdout.write(`\nReceived ${signal}; shutting down scheduler.\n`);
-      onShutdown();
-      resolve();
-    };
-    process.once('SIGINT', shutdown('SIGINT'));
-    process.once('SIGTERM', shutdown('SIGTERM'));
-  });
+  await runOnce(config, { debug, sendEmail, force });
 }
 
 async function sendEmailStep(
@@ -311,9 +255,6 @@ async function main(): Promise<void> {
       return;
     case 'scan':
       await runScan(process.argv.slice(3));
-      return;
-    case 'schedule':
-      await runSchedule(process.argv.slice(3));
       return;
   }
 }
