@@ -1,7 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { BrowserContext, Page, Response } from 'playwright';
-import { IBD_BASE_URL } from './auth.js';
+import { IBD_STOCK_LIST_URL_PREFIX } from './auth.js';
+import { solveHumanChallengeIfPresent } from './human-check.js';
 
 export type StockRow = {
   symbol: string;
@@ -24,31 +25,80 @@ export type ScrapeResult = {
 };
 
 export type PresetList = {
-  /** IBD's internal list id, e.g. `_NewHighs` (matches the `data-id` attribute). */
+  /**
+   * Stable internal id used in logs, debug filenames, and the persisted
+   * last-state file. Kept underscored (e.g. `_NewHighs`) for backward
+   * compatibility with previous runs of the screener.
+   */
   id: string;
   /** Human-readable name used in logs and email summaries. */
   name: string;
+  /**
+   * URL slug under `research.investors.com/stock-lists/`, e.g. `new-highs`.
+   * Also used as a soft hint when picking the right XHR response body for
+   * this list (see `pickBestListBody`). When `url` is set the slug is only
+   * used as that hint and doesn't drive navigation.
+   */
+  slug: string;
+  /**
+   * Optional absolute URL override for lists that don't live under the
+   * standard `/stock-lists/<slug>/` path (e.g. Stocks On The Move, which
+   * is still served from its legacy `/stocksonthemove.aspx` page).
+   */
+  url?: string;
 };
 
 /**
- * The nine IBD preset lists we scan. IDs come straight from the `data-id`
- * attribute on each menu item in the "IBD Stock Lists" popup.
+ * The IBD preset lists we scan. Most have a dedicated page under
+ * `research.investors.com/stock-lists/<slug>/`, with a couple of legacy
+ * `.aspx` pages mixed in. These are the lists exposed by the "Stock Lists"
+ * mega-menu (visible on pages like
+ * https://www.investors.com/ibd-indexes/ibd-breakout-stocks-index/) -- we
+ * navigate directly instead of driving the menu, which is more robust
+ * against header redesigns.
  *
- * (The menu also exposes `_StocksFundsBuying`, `_YourWeeklyReview`, and
- * `_IBDDataTables`, but those are subscriber-personalized / non-screener
- * views and are excluded on purpose.)
+ * (The menu also exposes `Your Weekly Review` and `IBD Data Tables`, but
+ * those are subscriber-personalized / non-screener views and are excluded
+ * on purpose. `Global Leaders` used to live at
+ * `/stock-lists/global-leaders/` but IBD has since retired it.)
  */
 export const PRESET_LISTS: readonly PresetList[] = [
-  { id: '_IBD50', name: 'IBD 50' },
-  { id: '_IBDBigCap20', name: 'IBD Big Cap 20' },
-  { id: '_SectorLeaders', name: 'Sector Leaders' },
-  { id: '_StockSpotlight', name: 'Stock Spotlight' },
-  { id: '_IPOLeaders', name: 'IPO Leaders' },
-  { id: '_NewHighs', name: 'New Highs' },
-  { id: '_RelativeStrengthHigh', name: 'Stocks With Rising RS' },
-  { id: '_GlobalLeaders', name: 'Global Leaders' },
-  { id: '_RisingProfitEstimates', name: 'Rising Profit Estimates' },
+  { id: '_IBD50', name: 'IBD 50', slug: 'ibd-50' },
+  { id: '_IBDBigCap20', name: 'IBD Big Cap 20', slug: 'big-cap-20' },
+  { id: '_SectorLeaders', name: 'Sector Leaders', slug: 'sector-leaders' },
+  { id: '_StockSpotlight', name: 'Stock Spotlight', slug: 'stock-spotlight' },
+  { id: '_IPOLeaders', name: 'IPO Leaders', slug: 'ipo-leaders' },
+  { id: '_NewHighs', name: 'New Highs', slug: 'new-highs' },
+  {
+    id: '_RelativeStrengthHigh',
+    name: 'Stocks With Rising RS',
+    slug: 'relative-strength-at-new-high',
+  },
+  {
+    id: '_RisingProfitEstimates',
+    name: 'Rising Profit Estimates',
+    slug: 'rising-profit-estimates',
+  },
+  {
+    id: '_StocksFundsBuying',
+    name: 'Stocks Funds Are Buying',
+    slug: 'stocks-that-funds-are-buying',
+  },
+  {
+    // Legacy page that predates the `/stock-lists/<slug>/` template, so we
+    // pass an absolute URL override. The slug is kept for symmetry with the
+    // other entries and as a hint for `pickBestListBody`.
+    id: '_StocksOnTheMove',
+    name: 'Stocks On The Move',
+    slug: 'stocksonthemove',
+    url: 'https://research.investors.com/stocksonthemove.aspx',
+  },
 ];
+
+/** Build the full URL for a preset list page. */
+function listUrl(list: PresetList): string {
+  return list.url ?? `${IBD_STOCK_LIST_URL_PREFIX}${list.slug}/`;
+}
 
 /**
  * Heuristic ticker validator (used only as a final fallback / sanity check).
@@ -123,58 +173,33 @@ function extractTickerFromHref(href: string): string | null {
 }
 
 /**
- * Navigate to the given IBD preset list inside IBD's SPA.
+ * Navigate directly to the given preset list's page on
+ * `research.investors.com/stock-lists/<slug>/`.
  *
- * The screener is built with Ant Design: the top nav has an "IBD Stock Lists"
- * trigger (`#ibdStocklistMenu`) that reveals a hover/click popup containing
- * the individual lists. Each list item is identified by `data-id`, e.g.
- * `[data-id="_NewHighs"]`. We:
- *   1. Hover the trigger so the popup renders (Ant Design uses `display: none`
- *      until then).
- *   2. Click the item and wait for the screener body to repaint.
+ * IBD's standalone `ibdstockscreener.investors.com` SPA was retired; the
+ * canonical entry points for the lists are now the per-list pages reachable
+ * from the "Stock Lists" mega-menu in the site header (visible on pages
+ * such as https://www.investors.com/ibd-indexes/ibd-breakout-stocks-index/).
+ * Going directly to the URL is faster and more robust than driving that
+ * menu, and the underlying XHR that populates the table fires either way.
  */
 async function gotoIbdList(page: Page, list: PresetList): Promise<void> {
-  await page.goto(IBD_BASE_URL, { waitUntil: 'domcontentloaded' });
+  const url = listUrl(list);
+  await page.goto(url, { waitUntil: 'domcontentloaded' });
+
+  // IBD's CDN sometimes serves a PerimeterX "Please verify you are a human"
+  // page instead of the list. Try to clear it (auto, then manual) before
+  // we wait for table content -- otherwise `waitForRows` would just spin
+  // for 60 s on a captcha page.
+  await solveHumanChallengeIfPresent(page);
+
   await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {});
 
-  // The "IBD Stock Lists" submenu trigger -- a real <div role="menuitem">
-  // (the parent of the visible #ibdStocklistMenu span). Hovering the inner
-  // span does NOT fire Ant Design's submenu open handler; we need the
-  // submenu-title div directly. We also click instead of hover, which is
-  // sticky (clicking again closes it, but it stays open between actions).
-  const trigger = page
-    .locator('div.ant-menu-submenu-title[data-menu-id$="-ibdList"]')
-    .first();
-  if (await trigger.count() === 0) {
-    process.stderr.write(
-      'warning: could not find the "IBD Stock Lists" menu trigger. Layout may have changed.\n',
-    );
-    return;
-  }
-
-  await trigger.scrollIntoViewIfNeeded().catch(() => {});
-  await trigger.hover().catch(() => {});
-  await page.waitForTimeout(300);
-  await trigger.click({ force: true }).catch(() => {});
-
-  // The popup is rendered into the DOM but Ant Design toggles its visibility
-  // class. force-click bypasses the visibility check; the menu-item handler
-  // still fires because the element is in the document.
-  const item = page.locator(`[data-id="${list.id}"]`).first();
-  await item.waitFor({ state: 'attached', timeout: 10_000 }).catch(() => {});
-  if (await item.count() === 0) {
-    process.stderr.write(
-      `warning: "${list.name}" item (${list.id}) never appeared in the menu.\n`,
-    );
-    return;
-  }
-
-  await item.click({ force: true, timeout: 10_000 }).catch(() => {});
-
-  // The screener loads rows over XHR. Wait until the table is actually
-  // populated -- networkidle isn't enough because IBD pings analytics
-  // continuously, and `waitFor({ state: 'attached' })` fires the moment a
-  // skeleton row exists. We poll for a meaningful row count instead.
+  // The list table is rendered after an XHR resolves. Wait until the table
+  // is actually populated -- `networkidle` isn't enough because IBD pings
+  // analytics continuously. We poll for a meaningful row count instead and
+  // tolerate timeouts because the JSON capture path can still succeed even
+  // when the DOM table never renders.
   await waitForRows(page, { minRows: 5, timeoutMs: 60_000 });
   await page.waitForTimeout(1_000);
 }
@@ -336,33 +361,40 @@ export async function scrapeIbdList(
   const maxResults = options.maxResults ?? 100;
   const page = await context.newPage();
 
-  // IBD's screener renders rows via canvas/custom widgets, so the symbols
-  // never appear in the DOM as plain text. They DO arrive over the wire as
-  // JSON, though, so we listen to every response while navigating and harvest
-  // symbols from JSON bodies that look like stock-list payloads.
-  const targetUrlRe = new RegExp(`/ibdlist/get/${list.id}\\b`, 'i');
+  // IBD's list pages render rows via custom widgets, so the symbols never
+  // appear in the DOM as plain text. They DO arrive over the wire as JSON,
+  // though, so we listen to every response while navigating and harvest
+  // both raw bodies and the symbols inside them. We then pick the best body
+  // by content shape (most rows with `comp_rating`) rather than by URL --
+  // that way a future endpoint rename doesn't break us.
   const captured: Array<{
     url: string;
     symbols: string[];
     sample: unknown;
     body?: unknown;
+    parsedRowCount: number;
   }> = [];
   const onResponse = async (response: Response): Promise<void> => {
     try {
-      if (response.request().resourceType() !== 'xhr' &&
-          response.request().resourceType() !== 'fetch') return;
+      const rt = response.request().resourceType();
+      if (rt !== 'xhr' && rt !== 'fetch') return;
       const ct = (response.headers()['content-type'] ?? '').toLowerCase();
       if (!ct.includes('json')) return;
       const body = await response.json().catch(() => null);
       if (!body) return;
       const symbols = harvestSymbolsFromJson(body);
       if (symbols.length === 0) return;
-      const isTargetList = targetUrlRe.test(response.url());
+      const parsedRowCount = parseListRows(body).length;
+      // Only retain the full body for payloads that look like a list of
+      // stocks with fundamentals -- otherwise we'd hold onto megabytes of
+      // unrelated widget JSON (charts, news cards, etc.).
+      const isListLike = parsedRowCount >= 5;
       captured.push({
         url: response.url(),
         symbols,
         sample: Array.isArray(body) ? body.slice(0, 1) : pickSample(body),
-        body: isTargetList ? body : undefined,
+        body: isListLike ? body : undefined,
+        parsedRowCount,
       });
     } catch {
       /* ignore */
@@ -385,7 +417,9 @@ export async function scrapeIbdList(
 
     // Prefer the structured list payload (filtered to actual stocks with
     // fundamentals -- this drops ETFs/funds that print no `comp_rating`).
-    const listBody = captured.find((c) => c.body !== undefined)?.body;
+    // Among multiple list-shaped bodies, pick the one with the most rows;
+    // tiebreak by URL containing the list slug as a hint.
+    const listBody = pickBestListBody(captured, list);
     if (listBody !== undefined) {
       const allStocks = parseListRows(listBody);
       const sorted = allStocks
@@ -423,6 +457,30 @@ export async function scrapeIbdList(
     page.off('response', onResponse);
     await page.close();
   }
+}
+
+/**
+ * Choose the captured JSON body that most likely represents the list's
+ * stock table. Picks the body with the most parsed rows; if there's a tie,
+ * prefer the URL that mentions the list's slug.
+ */
+function pickBestListBody(
+  captured: Array<{ url: string; body?: unknown; parsedRowCount: number }>,
+  list: PresetList,
+): unknown | undefined {
+  const withBody = captured.filter((c) => c.body !== undefined);
+  if (withBody.length === 0) return undefined;
+  const slugRe = new RegExp(list.slug.replace(/-/g, '[-_]?'), 'i');
+  const idRe = new RegExp(list.id.replace(/^_/, ''), 'i');
+  withBody.sort((a, b) => {
+    if (b.parsedRowCount !== a.parsedRowCount) {
+      return b.parsedRowCount - a.parsedRowCount;
+    }
+    const aHint = slugRe.test(a.url) || idRe.test(a.url) ? 1 : 0;
+    const bHint = slugRe.test(b.url) || idRe.test(b.url) ? 1 : 0;
+    return bHint - aHint;
+  });
+  return withBody[0]?.body;
 }
 
 /**
@@ -563,7 +621,13 @@ async function dumpDebugArtifacts(
   page: Page,
   outDir: string,
   list: PresetList,
-  captured: Array<{ url: string; symbols: string[]; sample: unknown; body?: unknown }> = [],
+  captured: Array<{
+    url: string;
+    symbols: string[];
+    sample: unknown;
+    body?: unknown;
+    parsedRowCount?: number;
+  }> = [],
 ): Promise<void> {
   await fs.mkdir(outDir, { recursive: true });
   // Strip the leading underscore so filenames read "debug-NewHighs-..." rather
@@ -627,21 +691,34 @@ async function dumpDebugArtifacts(
     .map((c) => ({
       url: c.url,
       symbolCount: c.symbols.length,
+      parsedRowCount: c.parsedRowCount ?? 0,
+      hasBody: c.body !== undefined,
       firstSymbols: c.symbols.slice(0, 10),
       sample: c.sample,
     }))
-    .sort((a, b) => b.symbolCount - a.symbolCount);
+    .sort((a, b) => {
+      const rc = (b.parsedRowCount ?? 0) - (a.parsedRowCount ?? 0);
+      if (rc !== 0) return rc;
+      return b.symbolCount - a.symbolCount;
+    });
   await fs.writeFile(
     path.join(outDir, `${prefix}-network.json`),
     JSON.stringify(networkSummary, null, 2),
     'utf8',
   );
 
-  const rawCapture = captured.find((c) => c.body !== undefined);
-  if (rawCapture && rawCapture.body !== undefined) {
+  const rawCapture = pickBestListBody(
+    captured.map((c) => ({
+      url: c.url,
+      body: c.body,
+      parsedRowCount: c.parsedRowCount ?? 0,
+    })),
+    list,
+  );
+  if (rawCapture !== undefined) {
     await fs.writeFile(
       path.join(outDir, `${prefix}-raw.json`),
-      JSON.stringify(rawCapture.body, null, 2),
+      JSON.stringify(rawCapture, null, 2),
       'utf8',
     );
   }

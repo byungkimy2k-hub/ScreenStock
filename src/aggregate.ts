@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import { z } from 'zod';
-import type { ScrapeResult } from './scrape.js';
+import type { ScrapeResult, StockRow } from './scrape.js';
 
 /**
  * A single symbol's fingerprint across the lists it was found on.
@@ -68,30 +68,40 @@ export function aggregateLists(
   const bySymbol = new Map<string, SymbolAppearance>();
 
   for (const result of results) {
-    for (const row of result.rows) {
-      const existing = bySymbol.get(row.symbol);
+    // Index this list's rows by symbol so we can enrich the appearance with
+    // ratings/price when available. Lists where the structured XHR body
+    // wasn't recognized (or its fields were renamed by IBD) come through
+    // with `rows: []` and only a populated `symbols` array -- those still
+    // count as appearances, just without ratings.
+    const rowBySymbol = new Map<string, StockRow>();
+    for (const row of result.rows) rowBySymbol.set(row.symbol, row);
+
+    for (const symbol of result.symbols) {
+      const row = rowBySymbol.get(symbol);
+      const existing = bySymbol.get(symbol);
       if (existing) {
         if (!existing.listIds.includes(result.listId)) {
           existing.lists.push(result.list);
           existing.listIds.push(result.listId);
           existing.listCount = existing.listIds.length;
         }
-        // Back-fill any field the first-seen row didn't have.
-        existing.company ??= row.company;
-        existing.compRating ??= row.compRating;
-        existing.epsRating ??= row.epsRating;
-        existing.rsRating ??= row.rsRating;
-        existing.price ??= row.price;
-        existing.pricePercentChange ??= row.pricePercentChange;
+        if (row) {
+          existing.company ??= row.company;
+          existing.compRating ??= row.compRating;
+          existing.epsRating ??= row.epsRating;
+          existing.rsRating ??= row.rsRating;
+          existing.price ??= row.price;
+          existing.pricePercentChange ??= row.pricePercentChange;
+        }
       } else {
-        bySymbol.set(row.symbol, {
-          symbol: row.symbol,
-          company: row.company,
-          compRating: row.compRating,
-          epsRating: row.epsRating,
-          rsRating: row.rsRating,
-          price: row.price,
-          pricePercentChange: row.pricePercentChange,
+        bySymbol.set(symbol, {
+          symbol,
+          company: row?.company ?? null,
+          compRating: row?.compRating ?? null,
+          epsRating: row?.epsRating ?? null,
+          rsRating: row?.rsRating ?? null,
+          price: row?.price ?? null,
+          pricePercentChange: row?.pricePercentChange ?? null,
           lists: [result.list],
           listIds: [result.listId],
           listCount: 1,

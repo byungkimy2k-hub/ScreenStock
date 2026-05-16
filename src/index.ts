@@ -21,7 +21,7 @@ function printHelp(): void {
       'Usage:',
       '  npm run login              Headed automated login using IBD_USER / IBD_PASSWORD from .env',
       '  npm run login -- --manual  Headed interactive login (you sign in by hand)',
-      '  npm run scan               Scrape all 9 IBD preset lists, aggregate, diff vs last run, email summary',
+      '  npm run scan               Scrape all 10 IBD preset lists, aggregate, diff vs last run, email summary',
       '  npm run scan -- --no-email Same as scan, but skip sending the Gmail summary (useful for testing)',
       '  npm run scan -- --force    Same as scan, but ignore the NYSE holiday skip',
       '  npm run scan -- --debug    Same as scan, plus dump per-list page HTML / screenshot / API payload to data/',
@@ -183,7 +183,7 @@ async function sendEmailStep(
     minListCount: config.screener.minListCount,
   });
   process.stdout.write(`\n=== Email ===\n`);
-  process.stdout.write(`To      : ${config.email.to}\n`);
+  process.stdout.write(`To      : ${config.email.to.join(', ')}\n`);
   process.stdout.write(`From    : ${config.email.from}\n`);
   process.stdout.write(`Subject : ${content.subject}\n`);
   try {

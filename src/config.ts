@@ -12,7 +12,18 @@ const SecretsSchema = z.object({
 
   GMAIL_USER: z.string().email('GMAIL_USER must be a valid email'),
   GMAIL_APP_PASSWORD: z.string().min(1, 'GMAIL_APP_PASSWORD is required'),
-  EMAIL_TO: z.string().min(1, 'EMAIL_TO is required'),
+  // Comma- or semicolon-separated list of recipients. We split on `;` (and
+  // `,` for convenience), trim, and require at least one non-empty entry.
+  EMAIL_TO: z
+    .string()
+    .min(1, 'EMAIL_TO is required')
+    .transform((v) =>
+      v
+        .split(/[;,]/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0),
+    )
+    .pipe(z.array(z.string().email('EMAIL_TO must contain valid emails')).min(1)),
   EMAIL_FROM: z.string().optional(),
 
   SKIP_EARLY_CLOSE_DAYS: z
@@ -48,7 +59,7 @@ export type AppPaths = {
 
 export type AppConfig = {
   ibd: { user: string; password: string };
-  email: { user: string; appPassword: string; to: string; from: string };
+  email: { user: string; appPassword: string; to: string[]; from: string };
   schedule: { skipEarlyCloseDays: boolean };
   screener: { minCompRating: number; maxResults: number; minListCount: number };
   paths: AppPaths;

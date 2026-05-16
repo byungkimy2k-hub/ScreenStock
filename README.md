@@ -1,6 +1,6 @@
 # IBD Screener Agent
 
-Logs into [IBD Stock Screener](https://ibdstockscreener.investors.com), scrapes nine preset lists, ranks symbols that appear on **2 or more lists**, flags newly seen symbols vs the previous run, and emails a summary via **Gmail**.
+Logs into [investors.com](https://www.investors.com/), scrapes ten IBD preset Stock Lists (IBD 50, Big Cap 20, Sector Leaders, Stock Spotlight, IPO Leaders, New Highs, Stocks With Rising RS, Rising Profit Estimates, Stocks Funds Are Buying, Stocks On The Move), ranks symbols that appear on **2 or more lists**, flags newly seen symbols vs the previous run, and emails a summary via **Gmail**.
 
 ## Requirements
 
@@ -25,7 +25,7 @@ cp .env.example .env
 | `IBD_USER` / `IBD_PASSWORD` | IBD Stock Screener login |
 | `GMAIL_USER` | Gmail address used to send summaries |
 | `GMAIL_APP_PASSWORD` | 16-char Google App Password (NOT your account password) |
-| `EMAIL_TO` | Recipient address |
+| `EMAIL_TO` | Recipient address(es). Multiple recipients can be separated by `;` (e.g. `a@x.com;b@y.com`). |
 | `EMAIL_FROM` | Optional display From (defaults to `GMAIL_USER`) |
 | `SKIP_EARLY_CLOSE_DAYS` | If `true`, skip NYSE early-close days. Default `false` (12:30 PT = 15:30 ET, after the 13:00 ET early close) |
 | `MIN_COMP_RATING` | Per-list Composite Rating cutoff. Default `94` (IBD's own default). |
@@ -38,7 +38,7 @@ cp .env.example .env
 ```bash
 npm run login                     # one-off: headed automated login, session is persisted in data/browser-profile
 npm run login -- --manual         # headed interactive login (sign in by hand)
-npm run scan                      # one-off: scrape 9 lists, aggregate, diff, email (skips NYSE holidays)
+npm run scan                      # one-off: scrape 10 lists, aggregate, diff, email (skips NYSE holidays)
 npm run scan -- --no-email        # same as scan, but skip the Gmail send (handy for testing)
 npm run scan -- --force           # same as scan, but ignore the NYSE holiday skip (manual re-run on days off)
 npm run scan -- --debug           # scan + dump per-list debug HTML / screenshot / raw JSON under data/

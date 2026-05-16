@@ -2,8 +2,18 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { chromium, type BrowserContext, type Page } from 'playwright';
 import type { AppPaths } from './config.js';
+import { solveHumanChallengeIfPresent } from './human-check.js';
 
-export const IBD_BASE_URL = 'https://ibdstockscreener.investors.com';
+/**
+ * Landing page we use after sign-in to "warm" the authenticated cookie jar.
+ * Historically this was the standalone `ibdstockscreener.investors.com` SPA,
+ * but IBD has since removed that screener UI in favor of the legacy per-list
+ * pages under `research.investors.com/stock-lists/<slug>/`. We point the warm
+ * page at the new Stock Lists hub so the login flow ends on a real page.
+ */
+export const IBD_BASE_URL = 'https://research.investors.com/stock-lists/';
+/** Per-list URL prefix. Append a slug like `new-highs/` (with trailing slash). */
+export const IBD_STOCK_LIST_URL_PREFIX = 'https://research.investors.com/stock-lists/';
 export const IBD_SIGNIN_URL = 'https://myibd.investors.com/secure/signin.aspx';
 
 async function ensureDir(dir: string): Promise<void> {
@@ -162,12 +172,18 @@ export async function loginAutomated(
     process.stdout.write(
       [
         '',
-        'If you see a "Verification Required" / slide-to-verify CAPTCHA in the browser,',
-        'solve it manually. The script will wait up to 5 minutes for the sign-in form',
-        'to appear, then fill in your credentials automatically.',
+        'If you see a "Verification Required" / slide-to-verify CAPTCHA, or a',
+        '"Please verify you are a human" press-and-hold prompt, solve it in',
+        'the browser window. The script will wait up to 5 minutes for the',
+        'sign-in form to appear, then fill in your credentials automatically.',
         '',
       ].join('\n'),
     );
+
+    // Surface a clear message if the press-and-hold challenge is what's
+    // blocking the username form. We don't fail here -- waitForFirstVisible
+    // below will keep polling regardless.
+    await solveHumanChallengeIfPresent(page, { timeoutMs: 300_000 });
 
     const emailField = await waitForFirstVisible(page, emailSelectors, { timeoutMs: 300_000 });
     if (!emailField) {
@@ -249,6 +265,7 @@ export async function loginAutomated(
 
     process.stdout.write(`Signed in. Visiting ${IBD_BASE_URL} to warm the screener session ...\n`);
     await page.goto(IBD_BASE_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
+    await solveHumanChallengeIfPresent(page);
     await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
 
     process.stdout.write(

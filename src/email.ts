@@ -5,7 +5,8 @@ import type { AggregationResult, SymbolAppearance } from './aggregate.js';
 export type EmailConfig = {
   user: string;
   appPassword: string;
-  to: string;
+  /** One or more recipient addresses. Nodemailer accepts a string[] directly. */
+  to: string[];
   from: string;
 };
 
