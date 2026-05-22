@@ -100,6 +100,14 @@ function listUrl(list: PresetList): string {
   return list.url ?? `${IBD_STOCK_LIST_URL_PREFIX}${list.slug}/`;
 }
 
+function randomBetween(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+async function waitLikeHuman(page: Page, minMs: number, maxMs: number): Promise<void> {
+  await page.waitForTimeout(randomBetween(minMs, maxMs));
+}
+
 /**
  * Heuristic ticker validator (used only as a final fallback / sanity check).
  * - Uppercase letters, with optional internal dot or hyphen (BRK.B, RDS-A)
@@ -185,6 +193,7 @@ function extractTickerFromHref(href: string): string | null {
  */
 async function gotoIbdList(page: Page, list: PresetList): Promise<void> {
   const url = listUrl(list);
+  await waitLikeHuman(page, 3_000, 5_000);
   await page.goto(url, { waitUntil: 'domcontentloaded' });
 
   // IBD's CDN sometimes serves a PerimeterX "Please verify you are a human"
@@ -194,6 +203,7 @@ async function gotoIbdList(page: Page, list: PresetList): Promise<void> {
   await solveHumanChallengeIfPresent(page);
 
   await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {});
+  await waitLikeHuman(page, 5_000, 8_000);
 
   // The list table is rendered after an XHR resolves. Wait until the table
   // is actually populated -- `networkidle` isn't enough because IBD pings
@@ -201,7 +211,7 @@ async function gotoIbdList(page: Page, list: PresetList): Promise<void> {
   // tolerate timeouts because the JSON capture path can still succeed even
   // when the DOM table never renders.
   await waitForRows(page, { minRows: 5, timeoutMs: 60_000 });
-  await page.waitForTimeout(1_000);
+  await waitLikeHuman(page, 3_000, 5_000);
 }
 
 /**
@@ -407,7 +417,7 @@ export async function scrapeIbdList(
     const url = page.url();
 
     // Give late XHRs a moment to land.
-    await page.waitForTimeout(2_000);
+    await waitLikeHuman(page, 3_000, 5_000);
 
     if (options.debugDir) {
       await dumpDebugArtifacts(page, options.debugDir, list, captured);
@@ -502,6 +512,7 @@ export async function scrapeAllLists(
       const message = err instanceof Error ? err.message : String(err);
       process.stderr.write(`error scraping ${list.name}: ${message}\n`);
     }
+    await new Promise((resolve) => setTimeout(resolve, randomBetween(6_000, 10_000)));
   }
   return results;
 }
